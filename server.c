@@ -1,0 +1,311 @@
+#include "common.h"
+#include "helpers.h"
+
+#define SOCKADDR_IN_SIZE sizeof ( struct sockaddr_in )
+
+struct client {
+    char ID[10];
+    char topics[50][51];
+    int subed_topics, real_poz;
+    char sf_topics[50][51];
+    int no_sf_topics;
+    struct server_pkg *pkgs;
+    int remaining_pkgs;
+};
+
+int start_socketfd ( enum __socket_type type, struct sockaddr_in servaddr ) {
+    int socketfd, rc;
+
+    socketfd = socket ( AF_INET, type, 0 );
+    DIE ( socketfd < 0, "socket" );
+ 
+    int enable = 1;
+    rc = setsockopt ( socketfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof ( int ) );
+    DIE ( rc < 0, "options" );
+
+    if ( type == SOCK_STREAM ) {
+        int flag = 1;
+        rc = setsockopt ( socketfd, IPPROTO_TCP, TCP_NODELAY, ( char* ) &flag, sizeof ( int ) ); 
+        DIE ( rc < 0, "TCP NO DELAY option" );  
+    }
+
+    rc = bind ( socketfd, ( const struct sockaddr* ) &servaddr, sizeof ( servaddr ) );
+    DIE ( rc < 0, "bind" );  
+
+    if ( type == SOCK_STREAM ) {
+        rc = listen ( socketfd, MAX_CONNECTIONS );
+        DIE ( rc < 0, "listen" );
+    }
+
+    return socketfd;
+}
+
+int check_id ( char* ID, int num_online, struct client *online_cl ) {
+    for ( int i = 3; i < num_online; i++ )
+        if ( !strcmp ( ID, online_cl[i].ID ) ) 
+            return -1;
+    return 1;
+}
+
+int is_subscribed ( struct client cl, char* topic ) {
+    for ( int i = 0; i < cl.subed_topics; i++ ) {
+        if ( !strcmp ( cl.topics[i], topic ) ) return 1;
+    }
+    return 0;
+}
+
+int is_subscribed_sf ( struct client cl, char* topic ) {
+    for ( int i = 0; i < cl.no_sf_topics; i++ ) {
+        if ( !strcmp ( cl.sf_topics[i], topic ) ) return 1;
+    }
+    return 0;
+}
+
+int is_new_client ( char* ID, struct client *all_cl, int num_cl ) {
+    for ( int i = 0; i < num_cl; i++ ) {
+        if ( !strcmp ( all_cl[i].ID, ID ) ) return i;
+    }
+    return -1;
+}
+
+int is_online ( struct client cl, struct client *online_cl, int num_online ) {
+    for ( int i = 3; i < num_online; i++ )
+        if ( !strcmp ( online_cl[i].ID, cl.ID ) ) return 1;
+    return 0;
+}
+
+int subscribe ( struct client *cl1, struct client *cl2, char* topic, int type ) {
+    if ( is_subscribed ( *cl1, topic ) && type == 0 ) return 1;
+    if ( is_subscribed_sf ( *cl1, topic ) ) return 1;
+    if ( type == 1 ) {
+        strcpy ( cl1->sf_topics[cl1->no_sf_topics], topic );
+        cl1->no_sf_topics++;
+        strcpy ( cl2->sf_topics[cl2->no_sf_topics], topic );
+        cl2->no_sf_topics++;
+    }
+    strcpy ( cl1->topics[cl1->subed_topics], topic );
+    cl1->subed_topics++;
+    strcpy ( cl2->topics[cl2->subed_topics], topic );
+    cl2->subed_topics++;
+    return 2;
+}
+
+int unsubscribe ( struct client *cl1, struct client *cl2, char* topic ) {
+    if ( !is_subscribed ( *cl1, topic ) ) return 1;
+    for ( int i = 0; i < cl1->subed_topics; i++ ) {
+        if ( !strcmp ( cl1->topics[i], topic ) ) {
+            for ( int j = i; j < cl1->subed_topics - 1; j++ ) {
+                strcpy ( cl1->topics[j], cl1->topics[j + 1] );
+                strcpy ( cl2->topics[j], cl2->topics[j + 1] );
+            }
+            break;
+        }
+    }
+    cl1->subed_topics--;
+    cl2->subed_topics--;
+    if ( !is_subscribed_sf ( *cl1, topic ) ) return 1;
+    for ( int i = 0; i < cl1->no_sf_topics; i++ ) {
+        if ( !strcmp ( cl1->sf_topics[i], topic ) ) {
+            for ( int j = i; j < cl1->no_sf_topics - 1; j++ ) {
+                strcpy ( cl1->sf_topics[j], cl1->sf_topics[j + 1] );
+                strcpy ( cl2->sf_topics[j], cl2->sf_topics[j + 1] );
+            }
+            break;
+        }
+    }
+    cl1->no_sf_topics--;
+    cl2->no_sf_topics--;
+    return 2;
+}
+
+void send_udp_msg ( struct server_pkg package, int num_online, struct client *online_cl, struct pollfd *poll_fds ) {
+    for ( int i = 3; i < num_online; i++ ) {
+        if ( is_subscribed ( online_cl[i], package.udp_pkg.topic ) ) {
+            int rc = send ( poll_fds[i].fd, &package, sizeof ( package ), 0 );
+            DIE ( rc < 0, "send" );
+        }
+    }
+}
+
+struct server_pkg recv_udp_msg ( int sockfd, struct client *all_cl, int num_cl, struct client *online_cl, int num_online ) {
+
+    struct server_pkg pkg;
+    struct sockaddr_in serv_addr;
+    struct udp_details_pkg details;
+    socklen_t socket_len = sizeof ( struct sockaddr_in );
+    memset ( &serv_addr, 0, socket_len );
+    struct udp_pkg package;
+
+    int rc = recvfrom ( sockfd, &package, sizeof ( package ), 0, ( struct sockaddr* ) &serv_addr, &socket_len );
+    DIE ( rc < 0, "recvfrom" );
+
+    details.ip = serv_addr.sin_addr.s_addr;
+    details.port = ntohs ( serv_addr.sin_port );
+
+    pkg.details = details;
+    pkg.udp_pkg = package;
+
+    for ( int i = 0; i < num_cl; i++ ) {
+        if ( is_online ( all_cl[i], online_cl, num_online ) ) continue;
+        if ( !is_subscribed_sf ( all_cl[i], package.topic ) ) continue;
+        all_cl[i].pkgs[all_cl[i].remaining_pkgs] = pkg;
+        all_cl[i].remaining_pkgs++;
+    }
+
+    return pkg;
+}
+
+int accept_connection ( int socket, struct client *online_cl, int num_online, struct client *all_cl, int *num_cl ) {
+    struct sockaddr_in cli_addr;
+    socklen_t cli_len = sizeof ( cli_addr );
+    int newsockfd = accept ( socket, ( struct sockaddr* ) &cli_addr, &cli_len );
+    DIE ( newsockfd < 0, "accept" );
+
+    char ID[ID_MAX_LENGTH];
+
+    int rc = recv ( newsockfd, ID, ID_MAX_LENGTH, 0 );
+    DIE ( rc < 0, "recv" );
+
+    int available = check_id ( ID, num_online, online_cl );
+    rc = send ( newsockfd, &available, sizeof ( available ), 0 );
+    DIE ( rc < 0, "send" );
+
+    if ( available == -1 ) {
+        printf ( "Client %s already connected.\n", ID );
+        return -1;
+    }
+
+    int poz = is_new_client ( ID, all_cl, *num_cl );
+    strcpy ( online_cl[num_online].ID, ID );
+    if ( poz == -1 ) {
+        strcpy ( all_cl[*num_cl].ID, ID );
+        online_cl[num_online].subed_topics = 0;
+        online_cl[num_online].no_sf_topics = 0;
+        all_cl[*num_cl].no_sf_topics = 0;
+        all_cl[*num_cl].subed_topics = 0;
+        all_cl[*num_cl].remaining_pkgs = 0;
+        all_cl[*num_cl].pkgs = calloc ( MAX_CONNECTIONS, sizeof ( struct server_pkg ) );
+        online_cl[num_online].real_poz = (*num_cl);
+        (*num_cl) = (*num_cl) + 1;
+    }
+    else {
+        for ( int i = 0; i < all_cl[poz].remaining_pkgs; i++ ) {
+            rc = send ( newsockfd, &all_cl[poz].pkgs[i], sizeof ( all_cl[poz].pkgs[i] ), 0 );
+            DIE ( rc < 0, "sf send" );
+        }
+        all_cl[poz].remaining_pkgs = 0;
+        online_cl[num_online] = all_cl[poz];
+        online_cl[num_online].real_poz = poz;
+    }
+
+    printf ( "New client %s connected from %s:%d.\n", online_cl[num_online].ID, inet_ntoa ( cli_addr.sin_addr ), ntohs ( cli_addr.sin_port ) );
+    return newsockfd;
+}
+
+int main ( int argc, char** args ) {
+
+    if ( argc != 2 ) {
+        printf ( "\n Usage: %s <port>\n", args[0] );
+        return 1;
+    }
+
+    setvbuf ( stdout, NULL, _IONBF, BUFSIZ );
+
+    struct client online_cl[MAX_CONNECTIONS];
+    struct pollfd poll_fds[MAX_CONNECTIONS];
+    struct client clients[MAX_CONNECTIONS];
+    for ( int i = 0; i < MAX_CONNECTIONS; i++ ) {
+        memset ( online_cl[i].ID, 0, sizeof ( online_cl[i].ID ) );
+        memset ( clients[i].ID, 0, sizeof ( clients[i].ID ) );
+        poll_fds[i].fd = 0;
+        poll_fds[i].events = 0;
+        poll_fds[i].revents = 0;
+    }
+    int num_online, num_clients;
+    
+    uint16_t port = atoi ( args[1] );
+
+    struct sockaddr_in serv_addr;
+    socklen_t socket_len = sizeof ( struct sockaddr_in );
+
+    memset ( &serv_addr, 0, socket_len );
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = htonl ( INADDR_ANY );
+    serv_addr.sin_port = htons ( port ); 
+
+    int tcp_sockfd = start_socketfd ( SOCK_STREAM, serv_addr );
+    int udp_sockfd = start_socketfd ( SOCK_DGRAM, serv_addr );
+
+    poll_fds[0].fd = 0;             // stdin socket
+    poll_fds[0].events = POLLIN;
+    poll_fds[1].fd = udp_sockfd;    // udp socket 
+    poll_fds[1].events = POLLIN;
+    poll_fds[2].fd = tcp_sockfd;    // tcp socket
+    poll_fds[2].events = POLLIN;
+    num_online = 3;
+
+    struct tcp_pkg tcp_pkg;
+    int ok = 1;
+
+    while ( ok ) {
+        int rc = poll ( poll_fds, num_online, -1 );
+        DIE ( rc < 0, "poll" );
+        for ( int i = 0; i < num_online; i++ ) {
+            if ( poll_fds[i].revents & POLLIN ) {
+                if ( poll_fds[i].fd == 0 ) {
+                    char command[50];
+                    scanf ( "%s", command );
+                    if ( !strcmp ( command, "exit" ) ) { ok = 0; break; }
+                }
+                else if ( poll_fds[i].fd == tcp_sockfd ) {
+                    int newsockfd = accept_connection ( tcp_sockfd, online_cl, num_online, clients, &num_clients );
+                    if ( newsockfd != -1 ) {
+                        poll_fds[num_online].fd = newsockfd;
+                        poll_fds[num_online].events = POLLIN;
+                    }
+                    num_online++;
+                }
+                else if ( poll_fds[i].fd == udp_sockfd ) {
+                    send_udp_msg ( recv_udp_msg ( udp_sockfd, clients, num_clients, online_cl, num_online ), num_online, online_cl, poll_fds );
+                }
+                else {
+                    rc = recv ( poll_fds[i].fd, &tcp_pkg, sizeof ( tcp_pkg ), 0 );
+                    DIE ( rc < 0, "recv");
+
+                    if ( rc == 0 ) {
+                        close ( poll_fds[i].fd );
+
+                        char ID[11];
+                        strcpy ( ID, online_cl[i].ID );
+
+                        poll_fds[i].fd = 0;
+                        poll_fds[i].events = 0;
+                        poll_fds[i].revents = 0;
+
+                        for ( int j = i; j < num_online - 1; j++ ) {
+                            poll_fds[j] = poll_fds[j + 1];
+                            online_cl[j] = online_cl[j + 1];
+                        }
+
+                        num_online--;
+
+                        printf ( "Client %s disconnected.\n", ID );
+                    }
+                    else {
+                        if ( tcp_pkg.data_type == 0 ) {
+                            unsubscribe ( &online_cl[i], &clients[online_cl[i].real_poz], tcp_pkg.topic );
+                        }
+                        else {
+                            subscribe ( &online_cl[i], &clients[online_cl[i].real_poz], tcp_pkg.topic, tcp_pkg.data_type - 1 );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    close ( udp_sockfd );
+    close ( tcp_sockfd );
+
+    return 0;
+}
