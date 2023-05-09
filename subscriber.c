@@ -88,18 +88,18 @@ int main ( int argc, char** args ) {
         DIE ( rc < 0, "poll" );
 
         if ( poll_fds[0].revents & POLLIN ) {
+            char buffer[BUFSIZ];
             char command[100], topic[100];
             uint8_t sf;
-            scanf ( "%s", command );
-            if ( !strcmp ( command, "exit" ) ) break;
-            else if ( !strcmp ( command, SUB ) ) {
-                scanf ( "%s %hhd", topic, &sf );
+            fgets ( buffer, BUFSIZ, stdin );
+            rc = sscanf ( buffer, "%s %s %hhd\n", command, topic, &sf );
+            if ( !strcmp ( command, EXIT ) ) break;
+            if ( !strcmp ( command, SUB ) && rc == 3 && sf <= 1 ) {
                 rc = send_sub_package ( sockfd, topic, sf, 1 );
                 DIE ( rc < 0, "send sub package" );
                 printf ( "Subscribed to topic.\n" );
             }
-            else if ( !strcmp ( command, UNSUB ) ) {
-                scanf ( "%s", topic );
+            else if ( !strcmp ( command, UNSUB ) && rc == 2 ) {
                 rc = send_sub_package ( sockfd, topic, 0, 0 );
                 DIE ( rc < 0, "send unsub package" );
                 printf ( "Unsubscribed from topic.\n" );

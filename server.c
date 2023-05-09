@@ -12,6 +12,10 @@ struct client {
     struct server_pkg *pkgs;
     int remaining_pkgs;
 };
+struct client online_cl[MAX_CONNECTIONS];
+struct pollfd poll_fds[MAX_CONNECTIONS];
+struct client clients[MAX_CONNECTIONS];
+int num_online, num_cl;
 
 int start_socketfd ( enum __socket_type type, struct sockaddr_in servaddr ) {
     int socketfd, rc;
@@ -40,7 +44,7 @@ int start_socketfd ( enum __socket_type type, struct sockaddr_in servaddr ) {
     return socketfd;
 }
 
-int check_id ( char* ID, int num_online, struct client *online_cl ) {
+int check_id ( char* ID ) {
     for ( int i = 3; i < num_online; i++ )
         if ( !strcmp ( ID, online_cl[i].ID ) ) 
             return -1;
@@ -61,14 +65,14 @@ int is_subscribed_sf ( struct client cl, char* topic ) {
     return 0;
 }
 
-int is_new_client ( char* ID, struct client *all_cl, int num_cl ) {
+int is_new_client ( char* ID ) {
     for ( int i = 0; i < num_cl; i++ ) {
-        if ( !strcmp ( all_cl[i].ID, ID ) ) return i;
+        if ( !strcmp ( clients[i].ID, ID ) ) return i;
     }
     return -1;
 }
 
-int is_online ( struct client cl, struct client *online_cl, int num_online ) {
+int is_online ( struct client cl ) {
     for ( int i = 3; i < num_online; i++ )
         if ( !strcmp ( online_cl[i].ID, cl.ID ) ) return 1;
     return 0;
@@ -118,7 +122,7 @@ int unsubscribe ( struct client *cl1, struct client *cl2, char* topic ) {
     return 2;
 }
 
-void send_udp_msg ( struct server_pkg package, int num_online, struct client *online_cl, struct pollfd *poll_fds ) {
+void send_udp_msg ( struct server_pkg package ) {
     for ( int i = 3; i < num_online; i++ ) {
         if ( is_subscribed ( online_cl[i], package.udp_pkg.topic ) ) {
             int rc = send ( poll_fds[i].fd, &package, sizeof ( package ), 0 );
@@ -127,7 +131,7 @@ void send_udp_msg ( struct server_pkg package, int num_online, struct client *on
     }
 }
 
-struct server_pkg recv_udp_msg ( int sockfd, struct client *all_cl, int num_cl, struct client *online_cl, int num_online ) {
+struct server_pkg recv_udp_msg ( int sockfd ) {
 
     struct server_pkg pkg;
     struct sockaddr_in serv_addr;
@@ -146,16 +150,16 @@ struct server_pkg recv_udp_msg ( int sockfd, struct client *all_cl, int num_cl, 
     pkg.udp_pkg = package;
 
     for ( int i = 0; i < num_cl; i++ ) {
-        if ( is_online ( all_cl[i], online_cl, num_online ) ) continue;
-        if ( !is_subscribed_sf ( all_cl[i], package.topic ) ) continue;
-        all_cl[i].pkgs[all_cl[i].remaining_pkgs] = pkg;
-        all_cl[i].remaining_pkgs++;
+        if ( is_online ( clients[i] ) ) continue;
+        if ( !is_subscribed_sf ( clients[i], package.topic ) ) continue;
+        clients[i].pkgs[clients[i].remaining_pkgs] = pkg;
+        clients[i].remaining_pkgs++;
     }
 
     return pkg;
 }
 
-int accept_connection ( int socket, struct client *online_cl, int num_online, struct client *all_cl, int *num_cl ) {
+void accept_connection ( int socket ) {
     struct sockaddr_in cli_addr;
     socklen_t cli_len = sizeof ( cli_addr );
     int newsockfd = accept ( socket, ( struct sockaddr* ) &cli_addr, &cli_len );
@@ -166,40 +170,43 @@ int accept_connection ( int socket, struct client *online_cl, int num_online, st
     int rc = recv ( newsockfd, ID, ID_MAX_LENGTH, 0 );
     DIE ( rc < 0, "recv" );
 
-    int available = check_id ( ID, num_online, online_cl );
+    int available = check_id ( ID );
     rc = send ( newsockfd, &available, sizeof ( available ), 0 );
     DIE ( rc < 0, "send" );
 
     if ( available == -1 ) {
         printf ( "Client %s already connected.\n", ID );
-        return -1;
+        return;
     }
 
-    int poz = is_new_client ( ID, all_cl, *num_cl );
+    poll_fds[num_online].fd = newsockfd;
+    poll_fds[num_online].events = POLLIN;
+
+    int poz = is_new_client ( ID );
     strcpy ( online_cl[num_online].ID, ID );
     if ( poz == -1 ) {
-        strcpy ( all_cl[*num_cl].ID, ID );
+        strcpy ( clients[num_cl].ID, ID );
         online_cl[num_online].subed_topics = 0;
         online_cl[num_online].no_sf_topics = 0;
-        all_cl[*num_cl].no_sf_topics = 0;
-        all_cl[*num_cl].subed_topics = 0;
-        all_cl[*num_cl].remaining_pkgs = 0;
-        all_cl[*num_cl].pkgs = calloc ( MAX_CONNECTIONS, sizeof ( struct server_pkg ) );
-        online_cl[num_online].real_poz = (*num_cl);
-        (*num_cl) = (*num_cl) + 1;
+        clients[num_cl].no_sf_topics = 0;
+        clients[num_cl].subed_topics = 0;
+        clients[num_cl].remaining_pkgs = 0;
+        clients[num_cl].pkgs = calloc ( MAX_CONNECTIONS, sizeof ( struct server_pkg ) );
+        online_cl[num_online].real_poz = num_cl;
+        num_cl++;
     }
     else {
-        for ( int i = 0; i < all_cl[poz].remaining_pkgs; i++ ) {
-            rc = send ( newsockfd, &all_cl[poz].pkgs[i], sizeof ( all_cl[poz].pkgs[i] ), 0 );
+        for ( int i = 0; i < clients[poz].remaining_pkgs; i++ ) {
+            rc = send ( newsockfd, &clients[poz].pkgs[i], sizeof ( clients[poz].pkgs[i] ), 0 );
             DIE ( rc < 0, "sf send" );
         }
-        all_cl[poz].remaining_pkgs = 0;
-        online_cl[num_online] = all_cl[poz];
+        clients[poz].remaining_pkgs = 0;
+        online_cl[num_online] = clients[poz];
         online_cl[num_online].real_poz = poz;
     }
 
     printf ( "New client %s connected from %s:%d.\n", online_cl[num_online].ID, inet_ntoa ( cli_addr.sin_addr ), ntohs ( cli_addr.sin_port ) );
-    return newsockfd;
+    num_online++;
 }
 
 int main ( int argc, char** args ) {
@@ -211,9 +218,6 @@ int main ( int argc, char** args ) {
 
     setvbuf ( stdout, NULL, _IONBF, BUFSIZ );
 
-    struct client online_cl[MAX_CONNECTIONS];
-    struct pollfd poll_fds[MAX_CONNECTIONS];
-    struct client clients[MAX_CONNECTIONS];
     for ( int i = 0; i < MAX_CONNECTIONS; i++ ) {
         memset ( online_cl[i].ID, 0, sizeof ( online_cl[i].ID ) );
         memset ( clients[i].ID, 0, sizeof ( clients[i].ID ) );
@@ -221,7 +225,6 @@ int main ( int argc, char** args ) {
         poll_fds[i].events = 0;
         poll_fds[i].revents = 0;
     }
-    int num_online, num_clients;
     
     uint16_t port = atoi ( args[1] );
 
@@ -258,15 +261,10 @@ int main ( int argc, char** args ) {
                     if ( !strcmp ( command, "exit" ) ) { ok = 0; break; }
                 }
                 else if ( poll_fds[i].fd == tcp_sockfd ) {
-                    int newsockfd = accept_connection ( tcp_sockfd, online_cl, num_online, clients, &num_clients );
-                    if ( newsockfd != -1 ) {
-                        poll_fds[num_online].fd = newsockfd;
-                        poll_fds[num_online].events = POLLIN;
-                    }
-                    num_online++;
+                    accept_connection ( tcp_sockfd );
                 }
                 else if ( poll_fds[i].fd == udp_sockfd ) {
-                    send_udp_msg ( recv_udp_msg ( udp_sockfd, clients, num_clients, online_cl, num_online ), num_online, online_cl, poll_fds );
+                    send_udp_msg ( recv_udp_msg ( udp_sockfd ) );
                 }
                 else {
                     rc = recv ( poll_fds[i].fd, &tcp_pkg, sizeof ( tcp_pkg ), 0 );

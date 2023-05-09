@@ -7,6 +7,7 @@
 #include <string.h>
 #include <netinet/tcp.h>
 
+#define EXIT "exit"
 #define MAX_CONNECTIONS 100
 #define ID_MAX_LENGTH 10
 
