@@ -12,10 +12,9 @@ struct client {
     struct server_pkg *pkgs;
     int remaining_pkgs;
 };
-struct client online_cl[MAX_CONNECTIONS];
-struct pollfd poll_fds[MAX_CONNECTIONS];
-struct client clients[MAX_CONNECTIONS];
-int num_online, num_cl;
+struct client *online_cl, *clients;
+struct pollfd *poll_fds;
+int num_online, num_cl, online_cap, client_cap;
 
 int start_socketfd ( enum __socket_type type, struct sockaddr_in servaddr ) {
     int socketfd, rc;
@@ -179,12 +178,21 @@ void accept_connection ( int socket ) {
         return;
     }
 
+    if ( num_online == online_cap ) {
+        poll_fds = ( struct pollfd* ) realloc ( poll_fds, 2 * online_cap * sizeof ( struct pollfd ) );
+        online_cl = ( struct client* ) realloc ( online_cl, 2 * online_cap * sizeof ( struct client ) );
+        online_cap *= 2;
+    }
     poll_fds[num_online].fd = newsockfd;
     poll_fds[num_online].events = POLLIN;
 
     int poz = is_new_client ( ID );
     strcpy ( online_cl[num_online].ID, ID );
     if ( poz == -1 ) {
+        if ( num_cl == client_cap ) {
+            clients = ( struct client* ) realloc ( clients, 2 * client_cap * sizeof ( struct client ) );
+            client_cap *= 2;
+        }
         strcpy ( clients[num_cl].ID, ID );
         online_cl[num_online].subed_topics = 0;
         online_cl[num_online].no_sf_topics = 0;
@@ -209,6 +217,14 @@ void accept_connection ( int socket ) {
     num_online++;
 }
 
+void init ( ) {
+    online_cl = calloc ( MAX_CONNECTIONS, sizeof ( struct client ) );
+    clients = calloc ( MAX_CONNECTIONS, sizeof ( struct client ) );
+    poll_fds = calloc ( MAX_CONNECTIONS, sizeof ( struct pollfd ) );
+    online_cap = MAX_CONNECTIONS;
+    client_cap = MAX_CONNECTIONS;
+}
+
 int main ( int argc, char** args ) {
 
     if ( argc != 2 ) {
@@ -217,14 +233,6 @@ int main ( int argc, char** args ) {
     }
 
     setvbuf ( stdout, NULL, _IONBF, BUFSIZ );
-
-    for ( int i = 0; i < MAX_CONNECTIONS; i++ ) {
-        memset ( online_cl[i].ID, 0, sizeof ( online_cl[i].ID ) );
-        memset ( clients[i].ID, 0, sizeof ( clients[i].ID ) );
-        poll_fds[i].fd = 0;
-        poll_fds[i].events = 0;
-        poll_fds[i].revents = 0;
-    }
     
     uint16_t port = atoi ( args[1] );
 
@@ -238,6 +246,8 @@ int main ( int argc, char** args ) {
 
     int tcp_sockfd = start_socketfd ( SOCK_STREAM, serv_addr );
     int udp_sockfd = start_socketfd ( SOCK_DGRAM, serv_addr );
+
+    init ( );
 
     poll_fds[0].fd = 0;             // stdin socket
     poll_fds[0].events = POLLIN;
